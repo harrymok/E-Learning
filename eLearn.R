@@ -2,6 +2,7 @@
 library(glmnet)
 library(earth)
 library(grf)
+library(kernlab)
 
 library(apg)  # accerlated proximal gradient descent
 # devtools::install_github("jpvert/apg")
@@ -51,6 +52,7 @@ CONFIG_DEFAULT <- within(list(), { # list of configuration parameters, default
   standardize <- TRUE
   penalty_grouped <- TRUE
   penalty_adaptive <- FALSE
+  method <- "keLearn"  # keLearn method
   # tuning setup
   lambda <- NULL
   lambda_max <- 1
@@ -182,7 +184,7 @@ value_function <- function(value.predict) {
   
   function(object, data_predict) {
     A_prescribe <- value.prescribe(object, data_predict)
-    return(with(data_predict, mean((A == A_prescribe) / prop_A * Y)))
+    return(with(data_predict, mean((A == A_prescribe) / pmax(1e-5, prop_A) * Y)))
   }
 }
 ### tuning lambda
@@ -732,7 +734,7 @@ dLearn_internal <- within(list(), {
       # input: vectorized coefficients
       # output: vectorized gradient
       coef_matrix <- matrix(coef_vec, nrow = p, ncol = K-1)
-      return(n^{-1} * as.numeric(Gram %*% coef_matrix - Corr))
+      return(n^{-1} * as.numeric(Gram %*% coef_matrix - Corr) + 1e-3 * coef_vec)
     }
   }
 })
@@ -863,7 +865,7 @@ rdLearn_internal <- within(list(), {
     function(coef_vec, opts = NULL) {
       # input: vectorized coefficients
       # output: vectorized gradient
-      return(n^{-1} * as.numeric(Gram %*% coef_vec - Corr))
+      return(n^{-1} * as.numeric(Gram %*% coef_vec - Corr) + 1e-3 * coef_vec)
     }
   }
 })
@@ -951,11 +953,11 @@ eLearn_internal <- within(list(), {
         stop("NAs in sigma2")
       }
       design_interaction <- (1 - 1/K) * (design_A %x_row% design_X)
-      V_A <- t(Omega) %*% Omega
+      V_A <- (1 - 1/K) * t(Omega) %*% Omega
       instrument <- t(sapply(1:n, function(id) {
         gradient_X <- diag(K-1) %x% design_X[id, ]
-        instrument_A <- design_A[id, ] / prop_A[id]
-        V <- t(Omega) %*% diag(sigma2[id, ]/prop[id, ]) %*% Omega
+        instrument_A <- design_A[id, ] / pmax(1e-5, prop_A[id])
+        V <- t(Omega) %*% diag(sigma2[id, ]/pmax(1e-5, prop[id, ])) %*% Omega
         V_inv <- with(svd(V), {
           d_inv <- ifelse(d >= 1e-5, d^{-1}, 0)
           D_inv <- diag(d_inv, nrow = K-1, ncol = K-1)
@@ -1010,7 +1012,7 @@ eLearn_internal <- within(list(), {
     function(coef_vec, opts = list()) {
       # input: vectorized coefficients
       # output: vectorized gradient
-      return(n^{-1} * as.numeric(Gram %*% coef_vec - Corr))
+      return(n^{-1} * as.numeric(Gram %*% coef_vec - Corr) + 1e-3 * coef_vec)
     }
   }
   eLearn.variance_function <- with(list(), {
@@ -1032,7 +1034,9 @@ eLearn_internal <- within(list(), {
     }
     ### define data preparation function
     variance_function.data <- function(data, config) {
-      data[["residual"]] <- eLearn.residual(data, config)
+      if(is.null(data[["residual"]])) {
+        data[["residual"]] <- eLearn.residual(data, config)
+      }
       data <- extract_list(data, c("X", "A", "residual"))
       
       return(switch(
@@ -1196,125 +1200,320 @@ predict.eLearn <- with(eLearn_internal, {
 # qqplot(x = data[["interaction_effect"]], y = pred[["prediction"]], xlab = "truth", ylab = "predict"); abline(0, 1)
 ####################################################################################################
 
-# # E-RD-Ensemble
-# config_erdLearn <- function(config = CONFIG) {
-#   config <- within(config, {
-#     names_assign <- c("alpha_seq_by", "n_fold_alpha", "verbose")
-#   })
-#   retain_name <- with(config, unique(c(
-#     names_assign, "alpha", "names_assign",
-#     names(config_rdLearn(config)),
-#     names(config_eLearn(config))
-#   )))
-#   config <- config[retain_name]
-#   return(config)
-# }
-# predict.erdLearn <- predict_template
-# erdLearn <- function(data, alpha = CONFIG[["alpha"]], config = CONFIG, ...) {
-#   # data: a list of: X, A, Y[, prop, sigma2, levels_X, range_X]
-#   # Assumption: Y has been subtracted from a treatment-free effect estimate
-#   # Assumption: if prop is unspecified, then propensity scores are computed by frequencies in A
-#   # alpha: ensemble weight
-#   # ...: unused argument
-# 
-#   config <- config_erdLearn(config)
-#   assign_list(config)
-# 
-#   if(verbose) {
-#     print("E-RD-Ensemble configurations:")
-#     print(unlist(within(config, rm(names_assign))))
-#   }
-# 
-#   # format input data
-#   data <- format_data(data[c("X", "A", "Y", "prop", "sigma2")])
-#   data_train <- data[c("X", "A", "Y", "prop", "sigma2")]
-#   data_others <- data[c("levels_X", "range_X")]
-#   data_pred <- data[c("X", "A", "Y", "prop_A")]
-#   assign_list(data, c("n", "K", "levels_A"))
-# 
-#   # tune alpha
-#   if(is.null(alpha)) {
-#     alpha_seq <- seq(0, 1, alpha_seq_by)
-#     if(verbose) {
-#       print(paste0("tuning alpha by ", n_fold_alpha, "-fold cross validation"))
-#     }
-#     predictor_rdLearn <- predictor_eLearn <- matrix(0, nrow = n, ncol = K)
-#     ids_cross <- cut(sample.int(n), breaks = n_fold_alpha, labels = 1:n_fold_alpha)
-#     for(id_fold in 1:n_fold_alpha) {
-#       if(verbose) {
-#         print(paste0("tuning: the ", id_fold, "-th fold"))
-#       }
-# 
-#       data_out <- lapply(data_train, as_function(~ subset(., id_fold != ids_cross)))
-#       data_out <- c(data_out, data_others)
-#       data_in  <- lapply(data_pred,  as_function(~ subset(., id_fold == ids_cross)))
-# 
-#       model_rdLearn <- rdLearn(data_out, , within(config, { verbose <- FALSE }))
-#       model_eLearn  <- eLearn(data_out, ,  within(config, { verbose <- FALSE }))
-#       pred_rdLearn  <- predict.rdLearn(model_rdLearn, data_in)
-#       pred_eLearn   <- predict.eLearn(model_eLearn, data_in)
-# 
-#       predictor_rdLearn[id_fold == ids_cross, ] <- pred_rdLearn[["interaction_effect"]]
-#       predictor_eLearn[id_fold == ids_cross, ]  <- pred_eLearn[["interaction_effect"]]
-#     }
-#     value_cv <- sapply(alpha_seq, function(alpha) {
-#       predictor_ensemble <- alpha * predictor_rdLearn + (1 - alpha) * predictor_eLearn
-#       A_pred_id <- apply(predictor_ensemble, 1, which.max)
-#       A_pred <- factor(levels_A[A_pred_id], levels = levels_A)
-#       return(with(data_in, mean((A == A_pred) / prop_A * Y)))
-#     })
-#     id_max <- which.max(value_cv)
-#     alpha <- alpha_seq[id_max]
-#     if(verbose) {
-#       names(value_cv) <- alpha_seq
-#       print("cross-validation values")
-#       print(value_cv)
-#       print(paste0("tuned alpha = ", alpha))
-#     }
-#   }
-# 
-#   ### training
-#   output <- within(list(), {
-#     model <- list(
-#       rdLearn = rdLearn(data, , config),
-#       eLearn = eLearn(data, , config)
-#     )
-#     data <- with(model, eLearn[["data"]])
-#     alpha <- alpha
-#     coefficients <- with(model, {
-#       alpha * rdLearn[["coefficients"]] + (1 - alpha) * eLearn[["coefficients"]]
-#     })
-#   })
-#   return(within(output, {
-#     # in-sample prediction
-#     prediction <- predict.erdLearn(output, data)
-#   }))
-# }
-####################################################################################################
-##### UNIT TEST for "erdLearn"
-# config <- within(CONFIG, {
-#   n_fold_lambda <- 2
-#   n_fold_alpha <- 2
-#   verbose <- TRUE
-# })
-# data <- data_multiple()
-# ### rdLearn
-# time_rdLearn <- system.time({
-#   coef_rdLearn <- rdLearn(data, , config)[["coefficients"]]
-# })
-#
-# ### eLearn
-# time_eLearn <- system.time({
-#   coef_eLearn <- eLearn(data, , config)[["coefficients"]]
-# })
-#
-# ### erdLearn with alpha = 0.5
-# time_erdLearn.5 <- system.time({
-#   coef_erdLearn.5 <- erdLearn(data, 0.5, config)[["coefficients"]]
-# })
-#
-### erdLearn with tuned alpha
-# time_erdLearn <- system.time({
-#   coef_erdLearn <- erdLearn(data, , config)[["coefficients"]]
-# })
-####################################################################################################
+# Kernel Learning
+krdLearn.internal <- within(list(), {
+  krdLearn.fit <- function(data) {
+    n <- nrow(data[["X"]])
+    K <- ncol(data[["design_A"]]) + 1
+    with(data[c("X", "design_A", "prop_A", "Y")], {
+      X <- as.matrix(X)
+      X.rowSumSq <- rowSums(X^2)
+      W <- diag(pmax(1e-5, prop_A)^{-1})
+      
+      function(kernel = rbfdot(sigma = 1)) {
+        Kmat <- kernelFast(kernel, X, X, X.rowSumSq)
+        AK <- design_A %x_row% Kmat
+        IK <- diag(K-1) %x% Kmat
+        WK <- W %*% Kmat
+        KWK <- t(WK) %*% Kmat
+        WAK <- W %*% AK
+        AKWAK <- t(WAK) %*% AK
+        
+        Gram_12 <- (1 - 1/K) * Kmat %*% WAK
+        Corr <- rbind(t(WK) %*% Y, (1 - 1/K) * t(WAK) %*% Y)
+        
+        function(lambda = 1) {
+          Gram_11 <- KWK + n * lambda * Kmat
+          Gram_22 <- (1 - 1/K)^2 * AKWAK + n * lambda * IK
+          Gram <- rbind(cbind(Gram_11, Gram_12), cbind(t(Gram_12), Gram_22))
+          
+          coef <- solve(Gram + 1e-5 * diag(n*K), Corr)
+          return(list(
+            treatment_free_effect.coefficients = coef[1:n],
+            interaction_effect.coefficients = matrix(coef[(n+1):(n*K)], n, K-1)
+          ))
+        }
+      }
+    })
+  }
+  krdLearn.evaluate <- function(data_train, data_predict, sigma_seq, lambda_seq) {
+    K <- ncol(data_train[["design_A"]]) + 1
+    output <- numeric()
+    
+    for(sigma in sigma_seq) {
+      kernel <- rbfdot(sigma)
+      fit <- krdLearn.fit(data_train)(kernel)
+      X_train <- as.matrix(data_train[["X"]])
+      X_predict <- as.matrix(data_predict[["X"]])
+      Kmat_predict <- kernelMatrix(kernel, X_predict, X_train)
+      
+      for(lambda in lambda_seq) {
+        representer.coefficients <- fit(lambda)
+        IPWRSS <- with(c(data_predict[c("design_A", "prop_A", "Y")], representer.coefficients), {
+          treatment_free_effect <- Kmat_predict %*% treatment_free_effect.coefficients
+          interaction_effect <- (1 - 1/K) * (Kmat_predict %*% interaction_effect.coefficients) %*_row% design_A
+          residual <- Y - treatment_free_effect - interaction_effect
+          mean(pmax(1e-5, prop_A)^{-1} * residual^2)
+        })
+        output <- rbind(output, c(sigma = sigma, lambda = lambda, IPWRSS = IPWRSS))
+      }
+    }
+    return(output)
+  }
+  krdLearn.cv <- function(data, sigma_seq, lambda_seq, n_fold = 5) {
+    n <- nrow(data[["X"]])
+    folds <- cut(sample(n), n_fold, labels = 1:n_fold)
+    output <- numeric()
+    for(fold in 1:n_fold) {
+      data_train <- lapply(data[c("X", "design_A", "prop_A", "Y")], function(object) subset(object, folds != fold))
+      data_test <- lapply(data[c("X", "design_A", "prop_A", "Y")], function(object) subset(object, folds == fold))
+      output <- rbind(output, krdLearn.evaluate(data_train, data_test, sigma_seq, lambda_seq))
+    }
+    return(output)
+  }
+})
+krdLearn <- with(krdLearn.internal, {
+  function(data) {
+    # tuning
+    sigma_seq <- 2^seq(-8, 2, length.out = 6)
+    lambda_seq <- 10^seq(-6, 2, length.out = 5)
+    cv_result <- krdLearn.cv(data, sigma_seq, lambda_seq) 
+    tuned <- data.frame(cv_result) %>% 
+      group_by(sigma, lambda) %>% 
+      summarise(across("IPWRSS", mean)) %>% 
+      ungroup() %>% 
+      slice_min(IPWRSS) %>% 
+      slice_max(lambda) %>% 
+      slice_max(sigma)
+    print("tunining results")
+    print(tuned)
+    kernel <- rbfdot(tuned[["sigma"]])
+    lambda <- tuned[["lambda"]]
+    
+    # training
+    coefficients <- krdLearn.fit(data)(kernel)(lambda)
+    
+    X <- as.matrix(data[["X"]])
+    return(list(
+      X = X, X.rowSumSq = rowSums(X^2),
+      kernel = kernel, coefficients = coefficients
+    ))
+  }
+})
+predict.krdLearn <- function(object, newdata, ...) {
+  K <- ncol(object[["coefficients"]][["interaction_effect.coefficients"]]) + 1
+  Omega <- code_generation(K)
+  
+  X_train <- as.matrix(object[["X"]])
+  if(!is.null(object[["X.rowSumSq"]])) {
+    X_train.rowSumSq <- object[["X.rowSumSq"]]
+  } else {
+    X_train.rowSumSq <- rowSums(X_train^2)
+  }
+  X_predict <- as.matrix(newdata[["X"]])
+  Kmat_predict <- t(kernelFast(object[["kernel"]], X_train, X_predict, X_train.rowSumSq))
+  
+  output <- with(object[["coefficients"]], within(list(), {
+    treatment_free_effect <- as.numeric(Kmat_predict %*% treatment_free_effect.coefficients)
+    interaction_effect.prediction <- Kmat_predict %*% interaction_effect.coefficients
+    interaction_effect <- (1 - 1/K) * interaction_effect.prediction %*% t(Omega)
+    
+    # optimal treatment
+    optimal_treatment <- factor(apply(interaction_effect, 1, which.max), levels = 1:K)
+    # prediction at optimal treatment
+    interaction_effect_optimal <- extract(interaction_effect, as.numeric(optimal_treatment))
+    # prediction at treated
+    if(!is.null(newdata[["A"]])) {
+      interaction_effect_treated <- extract(interaction_effect, as.numeric(newdata[["A"]]))
+    } else {
+      interaction_effect_treated <- NULL
+    }
+    # residual
+    if(!is.null(interaction_effect_treated) & !is.null(newdata[["Y"]])) {
+      residual <- as.numeric(newdata[["Y"]] - treatment_free_effect - interaction_effect_treated)
+    } else 
+      residual <- NULL
+  }))
+  return(output)
+}
+
+keLearn.internal <- within(list(), {
+  keLearn.fit <- function(data) {
+    n <- nrow(data[["X"]])
+    K <- ncol(data[["PO"]]) + 1
+    Omega <- code_generation(K)
+    with(data[c("X", "prop", "sigma2", "PO")], {
+      X <- as.matrix(X)
+      X.rowSumSq <- rowSums(X^2)
+      if(is.null(data[["sigma2"]])) { 
+        V <- diag(n) %x% (t(Omega) %*% Omega %*% t(Omega) %*% Omega)
+      } else {
+        V <- with(list(), {
+          output <- diag(n*(K-1))
+          for(i in 1:n) {
+            ids <- 1:(K-1) + (i-1)*(K-1)
+            V <- t(Omega) %*% diag(sigma2[i, ] / pmax(1e-5, prop[i, ]), K) %*% Omega
+            V_inv <- with(svd(V), {
+              d_inv <- ifelse(d >= 1e-5, d^{-1}, 0)
+              D_inv <- diag(d_inv, K-1)
+              return(u %*% D_inv %*% t(v))
+            })
+            output[ids, ids] <- t(Omega) %*% Omega %*% V_inv %*% t(Omega) %*% Omega
+          }
+          return(output)
+        })
+      }
+      Corr <- V %*% as.numeric(t(PO))
+      
+      function(kernel = rbfdot(sigma = 1)) {
+        Kmat <- kernelFast(kernel, X, X, X.rowSumSq)
+        VKI <- V %*% (Kmat %x% diag(K-1))
+        
+        function(lambda = 1) {
+          Gram <- VKI + n * lambda * diag(n*(K-1))
+          
+          coef.t <- solve(Gram + 1e-5 * diag(n*(K-1)), Corr)
+          return(t(matrix(coef.t, K-1, n)))
+        }
+      }
+    })
+  }
+  keLearn.evaluate <- function(data_train, data_predict, sigma_seq, lambda_seq) {
+    n <- nrow(data_predict[["X"]])
+    K <- ncol(data_train[["PO"]]) + 1
+    Omega <- code_generation(K)
+    if(is.null(data_predict[["sigma2"]])) { 
+      V <- diag(n) %x% (t(Omega) %*% Omega %*% t(Omega) %*% Omega)
+    } else {
+      V <- with(data_predict, {
+        output <- diag(n*(K-1))
+        for(i in 1:n) {
+          ids <- 1:(K-1) + (i-1)*(K-1)
+          V <- t(Omega) %*% diag(sigma2[i, ] / pmax(1e-5, prop[i, ]), K) %*% Omega
+          V_inv <- with(svd(V), {
+            d_inv <- ifelse(d >= 1e-5, d^{-1}, 0)
+            D_inv <- diag(d_inv, K-1)
+            return(u %*% D_inv %*% t(v))
+          })
+          output[ids, ids] <- t(Omega) %*% Omega %*% V_inv %*% t(Omega) %*% Omega
+        }
+        return(output)
+      })
+    }
+    
+    output <- numeric()
+    for(sigma in sigma_seq) {
+      kernel <- rbfdot(sigma)
+      fit <- keLearn.fit(data_train)(kernel)
+      X_train <- as.matrix(data_train[["X"]])
+      X_predict <- as.matrix(data_predict[["X"]])
+      Kmat_predict <- kernelMatrix(kernel, X_predict, X_train)
+      
+      for(lambda in lambda_seq) {
+        coefficients <- fit(lambda)
+        prediction <- Kmat_predict %*% coefficients
+        error <- as.numeric(t(data_predict[["PO"]] - prediction))
+        WMSE <- (1/n) * t(error) %*% V %*% error
+        output <- rbind(output, c(sigma = sigma, lambda = lambda, WMSE = WMSE))
+      }
+    }
+    return(output)
+  }
+  keLearn.cv <- function(data, sigma_seq, lambda_seq, n_fold = 5) {
+    n <- nrow(data[["X"]])
+    folds <- cut(sample(n), n_fold, labels = 1:n_fold)
+    output <- numeric()
+    for(fold in 1:n_fold) {
+      data_train <- lapply(data[c("X", "prop", "sigma2", "PO")], function(object) subset(object, folds != fold))
+      data_test <- lapply(data[c("X", "prop", "sigma2", "PO")], function(object) subset(object, folds == fold))
+      output <- rbind(output, keLearn.evaluate(data_train, data_test, sigma_seq, lambda_seq))
+    }
+    return(output)
+  }
+  keLearn.variance_function <- eLearn_internal[["eLearn.variance_function"]]
+})
+keLearn <- with(keLearn.internal, {
+  function(data, config) {
+    K <- ncol(data[["design_A"]]) + 1
+    Omega <- code_generation(K)
+    
+    if(config[["method"]] == "kdLearn") {
+      # D-Learning (Qi et al., 2020)
+      data[["sigma2"]] <- NULL
+      data[["PO"]] <- with(data, {
+        (design_A * Y / pmax(1e-5, prop_A)) %*% solve(t(Omega) %*% (Omega))
+      })
+    } else {
+      # initial fit
+      model.initial <- krdLearn(data)
+      prediction.initial <- predict.krdLearn(model.initial, data)
+      data[["residual"]] <- prediction.initial[["residual"]]
+      data[["PO"]] <- with(data, {
+        prediction.initial[["interaction_effect.prediction"]] + 
+          (design_A * residual / pmax(1e-5, prop_A)) %*% solve(t(Omega) %*% (Omega))
+      })
+      if(config[["method"]] == "kdrLearn") {
+        # DR-Learning and IF-Learning (Kenendy, 2020; Curth et al., 2020)
+        data[["sigma2"]] <- NULL
+      } else {
+        # E-Learning
+        data[["sigma2"]] <- keLearn.variance_function(data, config)
+      }
+    }
+    
+    # tuning
+    sigma_seq <- 2^seq(-8, 2, length.out = 6)
+    lambda_seq <- 10^seq(-6, 2, length.out = 5)
+    cv_result <- keLearn.cv(data, sigma_seq, lambda_seq)
+    tuned <- data.frame(cv_result) %>% 
+      group_by(sigma, lambda) %>% 
+      summarise(across("WMSE", mean)) %>% 
+      ungroup() %>% 
+      slice_min(WMSE) %>% 
+      slice_max(lambda) %>% 
+      slice_max(sigma)
+    print("tunining results")
+    print(tuned)
+    kernel <- rbfdot(tuned[["sigma"]])
+    lambda <- tuned[["lambda"]]
+    
+    # training
+    coefficients <- keLearn.fit(data)(kernel)(lambda)
+    
+    X <- as.matrix(data[["X"]])
+    return(list(
+      X = X, X.rowSumSq = rowSums(X^2),
+      kernel = kernel, coefficients = coefficients
+    ))
+  }
+})
+predict.keLearn <- function(object, newdata, ...) {
+  K <- ncol(object[["coefficients"]]) + 1
+  Omega <- code_generation(K)
+  
+  X_train <- as.matrix(object[["X"]])
+  if(!is.null(object[["X.rowSumSq"]])) {
+    X_train.rowSumSq <- object[["X.rowSumSq"]]
+  } else {
+    X_train.rowSumSq <- rowSums(X_train^2)
+  }
+  X_predict <- as.matrix(newdata[["X"]])
+  Kmat_predict <- t(kernelFast(object[["kernel"]], X_train, X_predict, X_train.rowSumSq))
+  
+  output <- within(list(), {
+    interaction_effect.prediction <- Kmat_predict %*% object[["coefficients"]]
+    interaction_effect <- (1 - 1/K) * interaction_effect.prediction %*% t(Omega)
+    
+    # optimal treatment
+    optimal_treatment <- factor(apply(interaction_effect, 1, which.max), levels = 1:K)
+    # prediction at optimal treatment
+    interaction_effect_optimal <- extract(interaction_effect, as.numeric(optimal_treatment))
+    # prediction at treated
+    if(!is.null(newdata[["A"]])) {
+      interaction_effect_treated <- extract(interaction_effect, as.numeric(newdata[["A"]]))
+    } else {
+      interaction_effect_treated <- NULL
+    }
+  })
+  return(output)
+}

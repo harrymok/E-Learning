@@ -29,6 +29,10 @@ code_generation <- function(K) {
 # t(code_generation(K)) %*% code_generation(K)  # (K/(K-1)) * identity
 ####################################################################################################
 
+# row-wise dot product
+`%*_row%` <- function(A, B) {
+  rowSums(A * B)
+}
 # row-wise Kronecker product
 `%x_row%` <- function(A, B) {
   as.matrix(t(Matrix::KhatriRao(t(A), t(B))))
