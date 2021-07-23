@@ -46,6 +46,7 @@ config_data_generation <- function(config = CONFIG) {
     }
   }))
 }
+h <- function(x) { exp(sqrt(2) * x) }
 data_generation <- function(config = CONFIG) {
   return(with(config_data_generation(config), within(list(), {
     # covariates
@@ -54,7 +55,7 @@ data_generation <- function(config = CONFIG) {
     # model specifications
     Exp_X <- exp(sqrt(2) * X[,1:K])
     ### treatment-free effects
-    treatment_free_effect <- sqrt(K) * rowMeans(X[,1:K]^2)
+    treatment_free_effect <- sqrt(K) * rowMeans(h(X[,1:K]))
     
     ### propensity scores
     propensity_score <- exp(X[,1:K] / 2)
@@ -73,7 +74,7 @@ data_generation <- function(config = CONFIG) {
     A <- apply(propensity_score, 1, function(prob) sample(K, 1, prob = prob))
     
     # interaction effects, optimal treatments and interaction effects at optimal
-    interaction_effect <- cbind(1, X^2) %*% coefficients
+    interaction_effect <- cbind(1, h(X)) %*% coefficients
     optimal_treatment <- apply(interaction_effect, 1, which.max)
     interaction_effect_optimal <- extract(interaction_effect, optimal_treatment)
     

@@ -21,15 +21,14 @@ others.R: functions for
 basic.R: basic functions
 cosso_interaction.R: SS-ANOVA model Y ~ X + A + A:X with COSSO penalty
 data_generation.R: generating data for unit tests and linear simulations
-data_nonlinear.R: generating data for nonlinear simulations
+data_cub.R, data_exp.R: generating data for nonlinear simulations
 
 # Experiments
 exp.R: simulation studies with non-kernel methods in eLearn.R
+exp_poly.R: {E,RD,D,Q}-Learning with the cubic polynomial basis
 exp_others.R: simulation studies with methods in others.R
-exp_kernel.R: simulation studies with kernel methods in eLearn.R
-exp.sh, exp_others.sh, exp_kernel.sh: configurations for simulation studies
+exp.sh, exp_others.sh: configurations for simulation studies
 
 ### running
 sh exp.sh
 sh exp_others.sh
-sh exp_kernel.sh
